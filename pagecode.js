@@ -2,55 +2,113 @@ import bhashini from 'bhashini-translation';
 import { getApiKey } from 'backend/keys.jsw';
 import wixData from 'wix-data';
 
+function blobToBase64(blob) {
+    const reader = new FileReader();
+    reader.readAsDataURL(blob);
+    return new Promise((resolve, reject) => {
+        reader.onloadend = () => {
+            if (typeof reader.result === 'string') {
+                resolve(reader.result.split(',')[1]);
+            } else {
+                reject('Error: reader result is not a string');
+            }
+        };
+        reader.onerror = reject;
+    });
+}
+
+async function initBhashini() {
+    const { UserId, UlcaApiKey, InferenceApiKey } = await getApiKey();
+    bhashini.auth(UserId, UlcaApiKey, InferenceApiKey);
+    return { UserId, UlcaApiKey, InferenceApiKey };
+}
+
+async function translateText(UserId, UlcaApiKey, InferenceApiKey, text, sourceLang, targetLang) {
+    bhashini.auth(UserId, UlcaApiKey, InferenceApiKey);
+    return await bhashini.nmt(sourceLang, targetLang, text);
+}
+
+async function performSearch(query) {
+    try {
+        const results = await wixData.query('BhashiniProducts')
+            .contains('title', query)
+            .or(wixData.query('BhashiniProducts').contains('productDescription', query))
+            .find();
+        $w('#repeater1').data = results.items;
+    } catch (err) {
+        console.error("Error querying BhashiniProducts:", err);
+    }
+}
+
+async function handleTextInput(inputText) {
+    const { UserId, UlcaApiKey, InferenceApiKey } = await initBhashini();
+    const translatedText = await translateText(UserId, UlcaApiKey, InferenceApiKey, inputText, 'hi', 'en');
+    console.log("Translated text:", translatedText);
+    $w("#inputBar").value = translatedText;
+    await performSearch(translatedText);
+}
+
+async function handleVoiceInput(audioBlob) {
+    const base64Audio = await blobToBase64(audioBlob);
+    const { UserId, UlcaApiKey, InferenceApiKey } = await initBhashini();
+    const response = await bhashini.asr_nmt('hi', 'en', base64Audio);
+    if (response) {
+        $w("#inputBar").value = response;
+        await performSearch(response);
+    } else {
+        console.error("No translation received from Bhashini API");
+    }
+}
+
+function setupVoiceRecorder() {
+    const voiceRecorder = $w('#voiceRecorder');
+    const voiceButton = $w('#voiceButton');
+    let isRecording = false;
+
+    if (voiceRecorder) {
+        console.log("VoiceRecorder custom element found");
+        voiceRecorder.on('audiofile', async ({ detail: { audioBlob } }) => {
+            if (audioBlob) {
+                await handleVoiceInput(audioBlob);
+            } else {
+                console.error("Audio blob is undefined");
+            }
+        });
+
+        voiceButton.onClick(() => {
+            console.log("VoiceButton clicked");
+            if (isRecording) {
+                console.log("Stopping recording");
+                voiceRecorder.setAttribute('startrecording', 'false');
+                voiceButton.style.backgroundColor = 'white'; // Reset background color
+            } else {
+                console.log("Starting recording");
+                voiceRecorder.setAttribute('startrecording', 'true');
+                voiceButton.style.backgroundColor = '#7FFFD4'; // Change background color to indicate recording
+            }
+            isRecording = !isRecording;
+        });
+    } else {
+        console.error("VoiceRecorder custom element or audio player not found");
+    }
+}
+
 $w.onReady(async function () {
-    let { UserId, UlcaApiKey, InferenceApiKey } = await getApiKey();
+    console.log("Page is ready");
 
-    // Function to perform translation and search
-    async function translateAndSearch() {
-        try {
-            // Get the input value in Hindi from the input field with ID 'searchbar'
-            const hindiInput = $w("#searchbar").value;
-            console.log("Hindi input:", hindiInput);
+    setupVoiceRecorder();
 
-            // Assuming bhashini.auth() needs to be called each time before translation
-            bhashini.auth(UserId, UlcaApiKey, InferenceApiKey);
+    $w('#searchBtn').onClick(() => {
+        const inputText = $w("#searchbar").value;
+        handleTextInput(inputText);
+    });
 
-            // Translate the input and then perform the search
-            const translatedText = await bhashini.nmt('hi', "en", hindiInput);
-            console.log(translatedText); // Log the translated text for debugging
-            $w("#inputBar").value = translatedText; // Assuming you want to display the translated text
-
-            // Now perform the search with the translated text
-            search(translatedText);
-        } catch (error) {
-            console.error("Translation or search error", error);
-        }
-    }
-
-    // Function to query the database and update the repeater
-    async function search(query) {
-        try {
-            const query = $w('#inputBar').value;
-            const results = await wixData.query('BhashiniProducts')
-                .contains('title', query)
-                .or(wixData.query('BhashiniProducts').contains('productDescription', query))
-                .find();
-
-            $w('#repeater1').data = results.items;
-        } catch (err) {
-            console.error("Error querying BhashiniProducts:", err);
-        }
-    }
-
-    // Event listener for search button click
-    $w('#searchBtn').onClick(() => translateAndSearch());
-
-    // Event listener for input in searchbar
     let throttle;
     $w('#searchbar').onInput(() => {
         clearTimeout(throttle);
         throttle = setTimeout(() => {
-            translateAndSearch();
+            const inputText = $w("#searchbar").value;
+            handleTextInput(inputText);
         }, 250);
     });
 });
